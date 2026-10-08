@@ -6,6 +6,7 @@ import urllib.request
 import urllib.parse
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.errors import FloodWaitError
 
 logging.basicConfig(level=logging.CRITICAL)
 for name in logging.root.manager.loggerDict:
@@ -15,8 +16,7 @@ logging.getLogger('telethon').setLevel(logging.CRITICAL)
 # ========== 环境变量 ==========
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
-SESSION_STRING = os.environ.get("SESSION_STRING", "")
-
+SESSION_STRING = (os.environ.get("SESSION_STRING", "") or "").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TARGET_GROUP_ID = int(os.environ.get("TARGET_GROUP_ID", 0))
 
@@ -25,17 +25,31 @@ TARGET_USERNAMES = [u.strip().lower().lstrip('@')
                     if u.strip()]
 # =============================
 
-if not all([API_ID, API_HASH, SESSION_STRING, BOT_TOKEN, TARGET_GROUP_ID]):
-    print("❌ 缺少环境变量")
+missing = []
+if not API_ID: missing.append("API_ID")
+if not API_HASH: missing.append("API_HASH")
+if not SESSION_STRING: missing.append("SESSION_STRING")
+if not BOT_TOKEN: missing.append("BOT_TOKEN")
+if not TARGET_GROUP_ID: missing.append("TARGET_GROUP_ID")
+if not TARGET_USERNAMES: missing.append("TARGET_USERNAMES")
+if missing:
+    print(f"❌ 缺少环境变量: {', '.join(missing)}")
     exit(1)
 
 client = TelegramClient(
     StringSession(SESSION_STRING),
     API_ID, API_HASH,
-    connection_retries=99, retry_delay=0,
-    auto_reconnect=True, request_retries=5,
-    flood_sleep_threshold=86400, sequential_updates=False,
+    connection_retries=5,
+    retry_delay=5,
+    auto_reconnect=True,
+    request_retries=3,
+    flood_sleep_threshold=86400,
+    sequential_updates=False,
 )
+
+# 全局缓存：用户名 -> 用户ID
+USERNAME_TO_ID = {}
+ID_TO_USERNAME = {}
 
 def clean_text(text):
     if not text: return ""
@@ -55,25 +69,27 @@ async def send_to_group(message):
 
 @client.on(events.NewMessage(incoming=True))
 async def handler(event):
+    # 只处理群消息
     if not event.is_group:
         return
 
+    # 【关键】只比对 ID，不调用 get_sender
+    if event.sender_id not in ID_TO_USERNAME:
+        return
+
+    # 命中目标后才获取发送者信息（每条消息最多一次）
     try:
         sender = await event.get_sender()
     except Exception:
         return
-
     if sender is None:
         return
 
-    sender_username = (getattr(sender, 'username', None) or '').lower()
-    if sender_username not in TARGET_USERNAMES:
-        return
-
+    username = ID_TO_USERNAME.get(event.sender_id, "未知")
     first_name = getattr(sender, 'first_name', '') or ''
     last_name = getattr(sender, 'last_name', '') or ''
     full_name = (first_name + ' ' + last_name).strip() or '未知用户'
-    username_str = f"@{sender_username}" if sender_username else "无用户名"
+    username_str = f"@{username}" if username else "无用户名"
 
     try:
         chat = await event.get_chat()
@@ -96,11 +112,36 @@ async def handler(event):
 
     await send_to_group(msg)
 
+async def resolve_usernames():
+    """启动时把用户名解析为 ID，只调用一次 API"""
+    print(f"[预热] 解析 {len(TARGET_USERNAMES)} 个用户名...")
+    for username in TARGET_USERNAMES:
+        try:
+            entity = await client.get_entity(username)
+            USERNAME_TO_ID[username] = entity.id
+            ID_TO_USERNAME[entity.id] = username
+            print(f"  ✓ @{username} -> {entity.id}")
+        except Exception as e:
+            print(f"  ✗ @{username} 解析失败: {e}")
+
 async def main():
-    await client.start()
-    print(f'[运行中] 监听所有群，目标用户：{TARGET_USERNAMES}')
-    print(f'[播报目标] 群 {TARGET_GROUP_ID}')
-    await client.run_until_disconnected()
+    try:
+        await client.start(phone=lambda: "")
+        print(f'[启动] SESSION_STRING 长度: {len(SESSION_STRING)}')
+        await resolve_usernames()
+        print(f'[运行中] 监听 {len(ID_TO_USERNAME)} 个目标用户')
+        await client.run_until_disconnected()
+    except FloodWaitError as e:
+        print(f'[限流] 需等待 {e.seconds} 秒...')
+        await asyncio.sleep(e.seconds)
+        await main()
+    except Exception as e:
+        print(f'[崩溃] {type(e).__name__}: {e}')
+        await asyncio.sleep(10)
+        await main()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
