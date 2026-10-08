@@ -18,7 +18,7 @@ API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 SESSION_STRING = (os.environ.get("SESSION_STRING", "") or "").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-TARGET_GROUP_ID = int(os.environ.get("TARGET_GROUP_ID", 0))
+MY_CHAT_ID = int(os.environ.get("MY_CHAT_ID", 0))
 
 TARGET_USERNAMES = [u.strip().lower().lstrip('@')
                     for u in os.environ.get("TARGET_USERNAMES", "").split(",")
@@ -30,7 +30,7 @@ if not API_ID: missing.append("API_ID")
 if not API_HASH: missing.append("API_HASH")
 if not SESSION_STRING: missing.append("SESSION_STRING")
 if not BOT_TOKEN: missing.append("BOT_TOKEN")
-if not TARGET_GROUP_ID: missing.append("TARGET_GROUP_ID")
+if not MY_CHAT_ID: missing.append("MY_CHAT_ID")
 if not TARGET_USERNAMES: missing.append("TARGET_USERNAMES")
 if missing:
     print(f"❌ 缺少环境变量: {', '.join(missing)}")
@@ -55,9 +55,9 @@ def clean_text(text):
     if not text: return ""
     return re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\u00a0]', '', text).strip()
 
-async def send_to_group(message):
+async def send_tg(message):
     safe = urllib.parse.quote(message, encoding='utf-8')
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage?chat_id={TARGET_GROUP_ID}&text={safe}"
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage?chat_id={MY_CHAT_ID}&text={safe}"
     req = urllib.request.Request(url, method='GET')
     try:
         def _send():
@@ -65,19 +65,16 @@ async def send_to_group(message):
                 pass
         await asyncio.to_thread(_send)
     except Exception as e:
-        print(f"[播报失败] {e}")
+        print(f"[推送失败] {e}")
 
 @client.on(events.NewMessage(incoming=True))
 async def handler(event):
-    # 只处理群消息
     if not event.is_group:
         return
 
-    # 【关键】只比对 ID，不调用 get_sender
     if event.sender_id not in ID_TO_USERNAME:
         return
 
-    # 命中目标后才获取发送者信息（每条消息最多一次）
     try:
         sender = await event.get_sender()
     except Exception:
@@ -110,7 +107,7 @@ async def handler(event):
         f"🔗 链接：{msg_link}"
     )
 
-    await send_to_group(msg)
+    await send_tg(msg)
 
 async def resolve_usernames():
     """启动时把用户名解析为 ID，只调用一次 API"""
@@ -129,7 +126,7 @@ async def main():
         await client.start(phone=lambda: "")
         print(f'[启动] SESSION_STRING 长度: {len(SESSION_STRING)}')
         await resolve_usernames()
-        print(f'[运行中] 监听 {len(ID_TO_USERNAME)} 个目标用户')
+        print(f'[运行中] 监听 {len(ID_TO_USERNAME)} 个目标用户，推送到 {MY_CHAT_ID}')
         await client.run_until_disconnected()
     except FloodWaitError as e:
         print(f'[限流] 需等待 {e.seconds} 秒...')
